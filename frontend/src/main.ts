@@ -7,7 +7,7 @@ import { SceneManager } from './visualization/SceneManager';
 import { CubeRenderer } from './visualization/CubeRenderer';
 import { NeuralSolver } from './neural/NeuralSolver';
 import { Solver } from './neural/Solver';
-import { Move, MOVES, CubeState } from './cube/CubeState';
+import { Move, MOVES } from './cube/CubeState';
 
 class App {
   private sceneManager!: SceneManager;
@@ -102,21 +102,33 @@ class App {
   private async scramble(): Promise<void> {
     if (this.cubeRenderer.isMoving() || this.isSolving) return;
     
+    this.isSolving = true; // Prevent other actions during scramble
     this.updateStatus('Scrambling...');
     
-    // Generate random moves
-    const cubeState = new (await import('./cube/CubeState')).CubeState();
-    const moves = cubeState.scramble(20);
+    // Reset to solved state first
+    this.cubeRenderer.reset();
+    this.moveCount = 0;
     
-    // Animate each move
-    for (const move of moves) {
-      await this.cubeRenderer.animateMove(move);
+    // Generate random scramble moves
+    const scrambleMoves: Move[] = [];
+    let lastBase = '';
+    
+    for (let i = 0; i < 20; i++) {
+      const available = MOVES.filter(m => m[0] !== lastBase);
+      const move = available[Math.floor(Math.random() * available.length)];
+      scrambleMoves.push(move);
+      lastBase = move[0];
     }
     
-    this.moveCount = 0;
-    this.updateSolutionDisplay(`Scramble: ${moves.join(' ')}`);
-    this.updateStats();
+    // Animate each move
+    for (const move of scrambleMoves) {
+      await this.cubeRenderer.animateMove(move);
+      this.updateStats();
+    }
+    
+    this.updateSolutionDisplay(`Scramble: ${scrambleMoves.join(' ')}`);
     this.updateStatus('Scrambled');
+    this.isSolving = false;
   }
 
   private reset(): void {

@@ -20,7 +20,7 @@ export const WHITE = 0, YELLOW = 1, RED = 2, ORANGE = 3, BLUE = 4, GREEN = 5;
 export const UP = WHITE, DOWN = YELLOW, FRONT = RED, BACK = ORANGE, RIGHT = BLUE, LEFT = GREEN;
 
 // Color values for rendering
-export const COLORS = {
+export const COLORS: { [key: number]: number } = {
   [WHITE]: 0xffffff,
   [YELLOW]: 0xffd500,
   [RED]: 0xe02020,

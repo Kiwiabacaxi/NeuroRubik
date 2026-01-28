@@ -1,242 +1,92 @@
 /**
  * 3D Rubik's Cube Renderer
- * Creates and animates the 3D cube using Three.js
+ * Based on proven approach using materials directly on cube faces
+ * and attach() for proper transform preservation during rotations
  */
 
 import * as THREE from 'three';
-import { CubeState, COLORS, Move, UP, DOWN, FRONT, BACK, RIGHT, LEFT } from '../cube/CubeState';
+import { CubeState, Move, MOVES } from '../cube/CubeState';
 import { SceneManager } from './SceneManager';
 
-// Cubie positions relative to center
-const POSITIONS = [-1, 0, 1];
-const CUBIE_SIZE = 0.95;
-const GAP = 0.02;
+// Configuration
+const CUBE_SIZE = 1;
+const SPACING = 0.05;
+const OFFSET = CUBE_SIZE + SPACING;
 
-interface Cubie {
-  mesh: THREE.Mesh;
-  position: THREE.Vector3;
-  stickers: THREE.Mesh[];
-}
+// Colors matching the standard cube
+const COLORS = {
+  R: 0x0045ad,  // Blue (Right)
+  L: 0x00a020,  // Green (Left)
+  U: 0xffffff,  // White (Up)
+  D: 0xffd500,  // Yellow (Down)
+  F: 0xe02020,  // Red (Front)
+  B: 0xff8000,  // Orange (Back)
+  Core: 0x111111
+};
+
+// Axes for rotation
+const AXES = {
+  X: new THREE.Vector3(1, 0, 0),
+  Y: new THREE.Vector3(0, 1, 0),
+  Z: new THREE.Vector3(0, 0, 1)
+};
 
 export class CubeRenderer {
   private sceneManager: SceneManager;
-  private cubeGroup: THREE.Group;
-  private cubies: Cubie[] = [];
-  private cubeState: CubeState;
+  private cubies: THREE.Mesh[] = [];
+  private pivot: THREE.Object3D;
   
   private isAnimating = false;
   private animationQueue: Array<{ move: Move; resolve: () => void }> = [];
-  private animationSpeed = 300; // ms per move
-
-  // Animation state
-  private currentRotation: {
-    axis: THREE.Vector3;
-    angle: number;
-    targetAngle: number;
-    affectedCubies: Cubie[];
-    pivotGroup: THREE.Group;
-  } | null = null;
+  private animationDuration = 300; // ms per move
 
   constructor(sceneManager: SceneManager) {
     this.sceneManager = sceneManager;
-    this.cubeGroup = new THREE.Group();
-    this.cubeState = new CubeState();
+    this.pivot = new THREE.Object3D();
+    this.sceneManager.scene.add(this.pivot);
     
     this.createCube();
-    this.sceneManager.scene.add(this.cubeGroup);
-    
-    // Register animation callback
-    this.sceneManager.onAnimate(this.update.bind(this));
   }
 
   private createCube(): void {
-    // Clear existing cubies
-    this.cubies = [];
-    this.cubeGroup.clear();
+    const geometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
+    
+    // Create edges geometry for black outlines
+    const edgesGeometry = new THREE.EdgesGeometry(geometry);
+    const edgesMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
 
-    // Create 26 cubies (27 minus center)
-    for (const x of POSITIONS) {
-      for (const y of POSITIONS) {
-        for (const z of POSITIONS) {
-          // Skip center cube
-          if (x === 0 && y === 0 && z === 0) continue;
+    for (let x = -1; x <= 1; x++) {
+      for (let y = -1; y <= 1; y++) {
+        for (let z = -1; z <= 1; z++) {
+          // Create materials for each face based on position
+          // Order: +X, -X, +Y, -Y, +Z, -Z (Right, Left, Up, Down, Front, Back)
+          const materials = [
+            new THREE.MeshStandardMaterial({ color: x === 1 ? COLORS.R : COLORS.Core }),  // Right (+X)
+            new THREE.MeshStandardMaterial({ color: x === -1 ? COLORS.L : COLORS.Core }), // Left (-X)
+            new THREE.MeshStandardMaterial({ color: y === 1 ? COLORS.U : COLORS.Core }),  // Up (+Y)
+            new THREE.MeshStandardMaterial({ color: y === -1 ? COLORS.D : COLORS.Core }), // Down (-Y)
+            new THREE.MeshStandardMaterial({ color: z === 1 ? COLORS.F : COLORS.Core }),  // Front (+Z)
+            new THREE.MeshStandardMaterial({ color: z === -1 ? COLORS.B : COLORS.Core }), // Back (-Z)
+          ];
+
+          const cubie = new THREE.Mesh(geometry, materials);
+          cubie.position.set(x * OFFSET, y * OFFSET, z * OFFSET);
           
-          const cubie = this.createCubie(x, y, z);
+          // Add black edges
+          const edges = new THREE.LineSegments(edgesGeometry, edgesMaterial);
+          cubie.add(edges);
+
+          cubie.castShadow = true;
+          cubie.receiveShadow = true;
+
+          this.sceneManager.scene.add(cubie);
           this.cubies.push(cubie);
-          this.cubeGroup.add(cubie.mesh);
         }
       }
     }
-
-    this.updateColors();
   }
 
-  private createCubie(x: number, y: number, z: number): Cubie {
-    // Black base cube
-    const geometry = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x111111,
-      metalness: 0.3,
-      roughness: 0.7
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(x * (1 + GAP), y * (1 + GAP), z * (1 + GAP));
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    const stickers: THREE.Mesh[] = [];
-    
-    // Add sticker faces
-    const stickerGeometry = new THREE.PlaneGeometry(0.85, 0.85);
-    
-    // Right face (x = 1)
-    if (x === 1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.rotation.y = Math.PI / 2;
-      sticker.position.x = CUBIE_SIZE / 2 + 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-    
-    // Left face (x = -1)
-    if (x === -1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.rotation.y = -Math.PI / 2;
-      sticker.position.x = -CUBIE_SIZE / 2 - 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-    
-    // Up face (y = 1)
-    if (y === 1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.rotation.x = -Math.PI / 2;
-      sticker.position.y = CUBIE_SIZE / 2 + 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-    
-    // Down face (y = -1)
-    if (y === -1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.rotation.x = Math.PI / 2;
-      sticker.position.y = -CUBIE_SIZE / 2 - 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-    
-    // Front face (z = 1)
-    if (z === 1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.position.z = CUBIE_SIZE / 2 + 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-    
-    // Back face (z = -1)
-    if (z === -1) {
-      const sticker = this.createSticker(stickerGeometry);
-      sticker.rotation.y = Math.PI;
-      sticker.position.z = -CUBIE_SIZE / 2 - 0.001;
-      mesh.add(sticker);
-      stickers.push(sticker);
-    }
-
-    return {
-      mesh,
-      position: new THREE.Vector3(x, y, z),
-      stickers
-    };
-  }
-
-  private createSticker(geometry: THREE.PlaneGeometry): THREE.Mesh {
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x333333,
-      metalness: 0.1,
-      roughness: 0.3,
-      side: THREE.FrontSide
-    });
-    const sticker = new THREE.Mesh(geometry, material);
-    return sticker;
-  }
-
-  updateColors(): void {
-    // Map stickers to cube state
-    // This is a simplified version - maps based on cubie position
-    
-    for (const cubie of this.cubies) {
-      const x = Math.round(cubie.position.x);
-      const y = Math.round(cubie.position.y);
-      const z = Math.round(cubie.position.z);
-      
-      let stickerIndex = 0;
-      
-      // Right face
-      if (x === 1) {
-        const idx = this.posToFaceIndex(RIGHT, y, z);
-        const color = this.cubeState.getSticker(RIGHT, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-      
-      // Left face
-      if (x === -1) {
-        const idx = this.posToFaceIndex(LEFT, y, z, true);
-        const color = this.cubeState.getSticker(LEFT, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-      
-      // Up face
-      if (y === 1) {
-        const idx = this.posToUpDownIndex(UP, x, z);
-        const color = this.cubeState.getSticker(UP, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-      
-      // Down face
-      if (y === -1) {
-        const idx = this.posToUpDownIndex(DOWN, x, z);
-        const color = this.cubeState.getSticker(DOWN, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-      
-      // Front face
-      if (z === 1) {
-        const idx = this.posToFaceIndex(FRONT, y, x);
-        const color = this.cubeState.getSticker(FRONT, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-      
-      // Back face
-      if (z === -1) {
-        const idx = this.posToFaceIndex(BACK, y, x, true);
-        const color = this.cubeState.getSticker(BACK, idx);
-        this.setMaterialColor(cubie.stickers[stickerIndex++], COLORS[color]);
-      }
-    }
-  }
-
-  private posToFaceIndex(_face: number, row: number, col: number, flipCol = false): number {
-    // row: -1, 0, 1 -> 0, 1, 2 (inverted because y goes up)
-    const r = 1 - row;
-    // col: -1, 0, 1 -> 0, 1, 2
-    const c = flipCol ? (1 - col) : (col + 1);
-    return r * 3 + c;
-  }
-
-  private posToUpDownIndex(_face: number, x: number, z: number): number {
-    // For UP: looking down
-    // x: -1, 0, 1 -> col 0, 1, 2
-    // z: 1, 0, -1 -> row 0, 1, 2
-    const row = 1 - z;
-    const col = x + 1;
-    return row * 3 + col;
-  }
-
-  private setMaterialColor(mesh: THREE.Mesh, color: number): void {
-    (mesh.material as THREE.MeshStandardMaterial).color.setHex(color);
-  }
-
-  // Animate a move
+  // Queue a move for animation
   async animateMove(move: Move): Promise<void> {
     return new Promise((resolve) => {
       this.animationQueue.push({ move, resolve });
@@ -248,197 +98,245 @@ export class CubeRenderer {
     if (this.isAnimating || this.animationQueue.length === 0) return;
     
     const { move, resolve } = this.animationQueue.shift()!;
-    this.startMoveAnimation(move, resolve);
+    this.executeMove(move, resolve);
   }
 
-  private startMoveAnimation(move: Move, onComplete: () => void): void {
+  private executeMove(move: Move, onComplete: () => void): void {
     this.isAnimating = true;
-    
+
     const baseMove = move[0] as 'R' | 'L' | 'U' | 'D' | 'F' | 'B';
     const isPrime = move.includes("'");
     const isDouble = move.includes('2');
     
-    const rotations = isDouble ? 2 : 1;
-    const direction = isPrime ? 1 : -1;
-    const targetAngle = (Math.PI / 2) * rotations * direction;
+    const { axisName, layerVal } = this.getMoveParams(baseMove);
     
-    // Get axis and affected cubies
-    const { axis, affectedCubies } = this.getMoveInfo(baseMove);
+    // Direction: normal = -1, prime = +1 (reversed for correct rotation)
+    let dir = isPrime ? 1 : -1;
     
-    // Create pivot group
-    const pivotGroup = new THREE.Group();
-    this.cubeGroup.add(pivotGroup);
-    
-    // Move affected cubies to pivot group
-    for (const cubie of affectedCubies) {
-      const worldPos = new THREE.Vector3();
-      cubie.mesh.getWorldPosition(worldPos);
-      this.cubeGroup.remove(cubie.mesh);
-      pivotGroup.add(cubie.mesh);
+    // Special cases for L, D, B (inverted axes)
+    if (baseMove === 'L' || baseMove === 'D' || baseMove === 'B') {
+      dir = -dir;
     }
     
-    this.currentRotation = {
-      axis,
-      angle: 0,
-      targetAngle,
-      affectedCubies,
-      pivotGroup
-    };
-
-    // Actually apply the move to state
-    this.cubeState.applyMove(move);
-
-    // Set timeout for animation completion
-    setTimeout(() => {
-      this.finishMoveAnimation(onComplete);
-    }, this.animationSpeed);
+    const targetAngle = (Math.PI / 2) * (isDouble ? 2 : 1) * dir;
+    
+    this.rotateLayer(axisName, layerVal, targetAngle, onComplete);
   }
 
-  private getMoveInfo(baseMove: string): { axis: THREE.Vector3; affectedCubies: Cubie[] } {
-    let axis: THREE.Vector3;
-    let filter: (c: Cubie) => boolean;
-    
+  private getMoveParams(baseMove: string): { axisName: 'X' | 'Y' | 'Z'; layerVal: number } {
     switch (baseMove) {
-      case 'R':
-        axis = new THREE.Vector3(-1, 0, 0);
-        filter = (c) => Math.round(c.position.x) === 1;
-        break;
-      case 'L':
-        axis = new THREE.Vector3(1, 0, 0);
-        filter = (c) => Math.round(c.position.x) === -1;
-        break;
-      case 'U':
-        axis = new THREE.Vector3(0, -1, 0);
-        filter = (c) => Math.round(c.position.y) === 1;
-        break;
-      case 'D':
-        axis = new THREE.Vector3(0, 1, 0);
-        filter = (c) => Math.round(c.position.y) === -1;
-        break;
-      case 'F':
-        axis = new THREE.Vector3(0, 0, -1);
-        filter = (c) => Math.round(c.position.z) === 1;
-        break;
-      case 'B':
-        axis = new THREE.Vector3(0, 0, 1);
-        filter = (c) => Math.round(c.position.z) === -1;
-        break;
-      default:
-        throw new Error(`Unknown move: ${baseMove}`);
+      case 'R': return { axisName: 'X', layerVal: 1 };
+      case 'L': return { axisName: 'X', layerVal: -1 };
+      case 'U': return { axisName: 'Y', layerVal: 1 };
+      case 'D': return { axisName: 'Y', layerVal: -1 };
+      case 'F': return { axisName: 'Z', layerVal: 1 };
+      case 'B': return { axisName: 'Z', layerVal: -1 };
+      default: throw new Error(`Unknown move: ${baseMove}`);
     }
-    
-    return {
-      axis,
-      affectedCubies: this.cubies.filter(filter)
+  }
+
+  private rotateLayer(
+    axisName: 'X' | 'Y' | 'Z',
+    layerVal: number,
+    targetAngle: number,
+    onComplete: () => void
+  ): void {
+    // Find cubies in this layer
+    const activeCubies: THREE.Mesh[] = [];
+    const epsilon = 0.1;
+    const worldPosCriteria = layerVal * OFFSET;
+
+    this.cubies.forEach(cubie => {
+      cubie.updateMatrixWorld();
+      const pos = cubie.position.clone();
+      
+      let match = false;
+      if (axisName === 'X' && Math.abs(pos.x - worldPosCriteria) < epsilon) match = true;
+      if (axisName === 'Y' && Math.abs(pos.y - worldPosCriteria) < epsilon) match = true;
+      if (axisName === 'Z' && Math.abs(pos.z - worldPosCriteria) < epsilon) match = true;
+      
+      if (match) activeCubies.push(cubie);
+    });
+
+    // Reset pivot
+    this.pivot.rotation.set(0, 0, 0);
+    this.pivot.position.set(0, 0, 0);
+
+    // Attach cubies to pivot (preserves world transform)
+    activeCubies.forEach(cubie => this.pivot.attach(cubie));
+
+    // Animation
+    const axisVec = AXES[axisName];
+    const startTime = Date.now();
+
+    const animate = () => {
+      const now = Date.now();
+      let progress = (now - startTime) / this.animationDuration;
+      if (progress > 1) progress = 1;
+      
+      // Ease in-out
+      const ease = progress < 0.5 
+        ? 2 * progress * progress 
+        : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+      // Apply rotation
+      this.pivot.rotation.set(0, 0, 0);
+      this.pivot.rotateOnAxis(axisVec, targetAngle * ease);
+
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        // Final rotation
+        this.pivot.rotation.set(0, 0, 0);
+        this.pivot.rotateOnAxis(axisVec, targetAngle);
+        this.pivot.updateMatrixWorld();
+
+        // Detach cubies back to scene (preserves world transform)
+        activeCubies.forEach(cubie => {
+          this.sceneManager.scene.attach(cubie);
+          // Round positions to avoid floating point drift
+          cubie.position.x = Math.round(cubie.position.x * 100) / 100;
+          cubie.position.y = Math.round(cubie.position.y * 100) / 100;
+          cubie.position.z = Math.round(cubie.position.z * 100) / 100;
+        });
+
+        this.isAnimating = false;
+        onComplete();
+        this.processQueue();
+      }
     };
+
+    requestAnimationFrame(animate);
   }
 
-  private finishMoveAnimation(onComplete: () => void): void {
-    if (!this.currentRotation) return;
-    
-    const { affectedCubies, pivotGroup, targetAngle, axis } = this.currentRotation;
-    
-    // Apply final rotation
-    pivotGroup.rotation.setFromAxisAngle(axis, targetAngle);
-    
-    // Update cubie positions based on rotation
-    for (const cubie of affectedCubies) {
-      const worldPos = new THREE.Vector3();
-      cubie.mesh.getWorldPosition(worldPos);
-      
-      // Apply rotation to position
-      cubie.position.applyAxisAngle(axis, targetAngle);
-      
-      // Round to nearest integer
-      cubie.position.x = Math.round(cubie.position.x);
-      cubie.position.y = Math.round(cubie.position.y);
-      cubie.position.z = Math.round(cubie.position.z);
-      
-      // Move back to main group
-      pivotGroup.remove(cubie.mesh);
-      cubie.mesh.position.set(
-        cubie.position.x * (1 + GAP),
-        cubie.position.y * (1 + GAP),
-        cubie.position.z * (1 + GAP)
-      );
-      cubie.mesh.rotation.set(0, 0, 0);
-      this.cubeGroup.add(cubie.mesh);
-    }
-    
-    // Remove pivot group
-    this.cubeGroup.remove(pivotGroup);
-    
-    // Update colors
-    this.updateColors();
-    
-    this.currentRotation = null;
-    this.isAnimating = false;
-    
-    onComplete();
-    
-    // Process next in queue
-    this.processQueue();
-  }
-
-  private update(delta: number): void {
-    if (!this.currentRotation) return;
-    
-    const { axis, targetAngle, pivotGroup } = this.currentRotation;
-    const speed = (Math.PI / 2) / (this.animationSpeed / 1000);
-    
-    // Animate rotation
-    this.currentRotation.angle += speed * delta * Math.sign(targetAngle);
-    
-    // Clamp to target
-    if (Math.abs(this.currentRotation.angle) >= Math.abs(targetAngle)) {
-      this.currentRotation.angle = targetAngle;
-    }
-    
-    pivotGroup.rotation.setFromAxisAngle(axis, this.currentRotation.angle);
-  }
-
-  // Public methods
-  setCubeState(state: CubeState): void {
-    this.cubeState = state.clone();
-    this.resetCubiePositions();
-    this.updateColors();
-  }
-
+  // Get current cube state from 3D representation
   getCubeState(): CubeState {
-    return this.cubeState.clone();
+    const state = new CubeState();
+    
+    // For neural network, we need to extract state from 3D
+    // This maps the visual cube to the internal state representation
+    this.cubies.forEach(cubie => {
+      cubie.updateMatrixWorld();
+      const pos = cubie.position.clone();
+      const ix = Math.round(pos.x / OFFSET);
+      const iy = Math.round(pos.y / OFFSET);
+      const iz = Math.round(pos.z / OFFSET);
+
+      // Map each visible face to state
+      if (iy === 1) this.mapFaceToState(state, 'U', ix, iz, cubie, new THREE.Vector3(0, 1, 0));
+      if (iy === -1) this.mapFaceToState(state, 'D', ix, iz, cubie, new THREE.Vector3(0, -1, 0));
+      if (iz === 1) this.mapFaceToState(state, 'F', ix, iy, cubie, new THREE.Vector3(0, 0, 1));
+      if (iz === -1) this.mapFaceToState(state, 'B', ix, iy, cubie, new THREE.Vector3(0, 0, -1));
+      if (ix === 1) this.mapFaceToState(state, 'R', iy, iz, cubie, new THREE.Vector3(1, 0, 0));
+      if (ix === -1) this.mapFaceToState(state, 'L', iy, iz, cubie, new THREE.Vector3(-1, 0, 0));
+    });
+
+    return state;
   }
 
-  private resetCubiePositions(): void {
-    let index = 0;
-    for (const x of POSITIONS) {
-      for (const y of POSITIONS) {
-        for (const z of POSITIONS) {
-          if (x === 0 && y === 0 && z === 0) continue;
-          
-          const cubie = this.cubies[index++];
-          cubie.position.set(x, y, z);
-          cubie.mesh.position.set(x * (1 + GAP), y * (1 + GAP), z * (1 + GAP));
-          cubie.mesh.rotation.set(0, 0, 0);
-        }
+  private mapFaceToState(
+    state: CubeState, 
+    faceName: string, 
+    coord1: number, 
+    coord2: number, 
+    cubie: THREE.Mesh, 
+    targetNormal: THREE.Vector3
+  ): void {
+    // Find which material face is pointing in the target direction
+    const localNormals = [
+      new THREE.Vector3(1, 0, 0),   // 0: +X (R material)
+      new THREE.Vector3(-1, 0, 0),  // 1: -X (L material)
+      new THREE.Vector3(0, 1, 0),   // 2: +Y (U material)
+      new THREE.Vector3(0, -1, 0),  // 3: -Y (D material)
+      new THREE.Vector3(0, 0, 1),   // 4: +Z (F material)
+      new THREE.Vector3(0, 0, -1)   // 5: -Z (B material)
+    ];
+
+    let bestDot = -1;
+    let bestMatIndex = 0;
+    const cubieRot = cubie.quaternion;
+
+    for (let i = 0; i < 6; i++) {
+      const worldNormal = localNormals[i].clone().applyQuaternion(cubieRot);
+      const dot = worldNormal.dot(targetNormal);
+      if (dot > bestDot) {
+        bestDot = dot;
+        bestMatIndex = i;
       }
     }
+
+    // Get color from material
+    const materials = cubie.material as THREE.MeshStandardMaterial[];
+    const color = materials[bestMatIndex].color.getHex();
+    
+    // Map color to face index
+    const colorToFace: { [key: number]: number } = {
+      [COLORS.U]: 0,  // White = UP
+      [COLORS.D]: 1,  // Yellow = DOWN
+      [COLORS.F]: 2,  // Red = FRONT
+      [COLORS.B]: 3,  // Orange = BACK
+      [COLORS.R]: 4,  // Blue = RIGHT
+      [COLORS.L]: 5,  // Green = LEFT
+    };
+
+    const faceValue = colorToFace[color] ?? 0;
+    
+    // Calculate state index based on face and position
+    const faceIndex = { 'U': 0, 'D': 1, 'F': 2, 'B': 3, 'R': 4, 'L': 5 }[faceName]!;
+    let stateIdx: number;
+    
+    switch (faceName) {
+      case 'U':
+        stateIdx = (1 - coord2) * 3 + (coord1 + 1);
+        break;
+      case 'D':
+        stateIdx = (coord2 + 1) * 3 + (coord1 + 1);
+        break;
+      case 'F':
+        stateIdx = (1 - coord2) * 3 + (coord1 + 1);
+        break;
+      case 'B':
+        stateIdx = (1 - coord2) * 3 + (1 - coord1);
+        break;
+      case 'R':
+        stateIdx = (1 - coord1) * 3 + (1 - coord2);
+        break;
+      case 'L':
+        stateIdx = (1 - coord1) * 3 + (coord2 + 1);
+        break;
+      default:
+        stateIdx = 0;
+    }
+    
+    state.state[faceIndex * 9 + stateIdx] = faceValue;
   }
 
+  // Reset to solved state
   reset(): void {
-    this.cubeState = new CubeState();
-    this.resetCubiePositions();
-    this.updateColors();
+    // Remove all cubies
+    this.cubies.forEach(cubie => {
+      this.sceneManager.scene.remove(cubie);
+    });
+    this.cubies = [];
+    
+    // Recreate cube
+    this.createCube();
   }
 
-  scramble(numMoves: number = 20): Move[] {
-    const moves = this.cubeState.scramble(numMoves);
-    this.resetCubiePositions();
-    this.updateColors();
-    return moves;
+  // Check if cube is solved
+  isSolved(): boolean {
+    const state = this.getCubeState();
+    return state.isSolved();
+  }
+
+  // Count correct stickers
+  countCorrectStickers(): number {
+    const state = this.getCubeState();
+    return state.countCorrectStickers();
   }
 
   setAnimationSpeed(ms: number): void {
-    this.animationSpeed = ms;
+    this.animationDuration = ms;
   }
 
   isMoving(): boolean {
