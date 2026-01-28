@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict
 
 import numpy as np
+import torch
 
 from .network import CubeSolverNetwork
 
@@ -21,26 +22,26 @@ def export_weights_to_json(network: CubeSolverNetwork, filepath: str):
     {
         "architecture": {...},
         "layers": [
-            {"name": "fc1", "weights": [...], "bias": [...], "shape": [...]},
+            {"name": "layer_0", "weights": [...], "bias": [...], "shape": [...]},
             ...
         ]
     }
     """
     data = {"architecture": network.get_architecture(), "layers": []}
 
-    # Export each layer
-    layer_names = ["fc1", "fc2", "fc3"]
-    layers = [network.fc1, network.fc2, network.fc3]
-
-    for name, layer in zip(layer_names, layers):
-        layer_data = {
-            "name": name,
-            "weights": layer.weight.data.cpu().numpy().tolist(),
-            "bias": layer.bias.data.cpu().numpy().tolist(),
-            "weight_shape": list(layer.weight.shape),
-            "bias_shape": list(layer.bias.shape),
-        }
-        data["layers"].append(layer_data)
+    # Extract Linear layers from Sequential
+    layer_idx = 0
+    for module in network.network:
+        if isinstance(module, torch.nn.Linear):
+            layer_data = {
+                "name": f"fc{layer_idx}",
+                "weights": module.weight.data.cpu().numpy().tolist(),
+                "bias": module.bias.data.cpu().numpy().tolist(),
+                "weight_shape": list(module.weight.shape),
+                "bias_shape": list(module.bias.shape),
+            }
+            data["layers"].append(layer_data)
+            layer_idx += 1
 
     with open(filepath, "w") as f:
         json.dump(data, f)
@@ -56,19 +57,18 @@ def load_weights_from_json(network: CubeSolverNetwork, filepath: str):
         network: Network to load weights into
         filepath: Path to JSON file
     """
-    import torch
-
     with open(filepath) as f:
         data = json.load(f)
 
-    layers = [network.fc1, network.fc2, network.fc3]
+    # Extract Linear layers from Sequential
+    linear_layers = [m for m in network.network if isinstance(m, torch.nn.Linear)]
 
-    for layer_data, layer in zip(data["layers"], layers):
+    for layer_data, layer in zip(data["layers"], linear_layers):
         weights = np.array(layer_data["weights"], dtype=np.float32)
         bias = np.array(layer_data["bias"], dtype=np.float32)
 
-        layer.weight.data = torch.FloatTensor(weights)
-        layer.bias.data = torch.FloatTensor(bias)
+        layer.weight.data = torch.FloatTensor(weights).to(network.device)
+        layer.bias.data = torch.FloatTensor(bias).to(network.device)
 
     print(f"Weights loaded from {filepath}")
 

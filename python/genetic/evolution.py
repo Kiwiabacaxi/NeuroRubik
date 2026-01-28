@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 from tqdm import tqdm
 
-from .fitness import FitnessEvaluator
 from .individual import Individual
 
 
@@ -83,9 +82,7 @@ class GeneticAlgorithm:
                 best = self.population[idx]
         return best
 
-    def evolve_generation(
-        self, evaluator: FitnessEvaluator, progress_callback: Optional[Callable] = None
-    ):
+    def evolve_generation(self, evaluator: Any, progress_callback: Optional[Callable] = None):
         """
         Evolve one generation.
 
@@ -149,7 +146,7 @@ class GeneticAlgorithm:
 
     def run(
         self,
-        evaluator: FitnessEvaluator,
+        evaluator: Any,
         num_generations: int,
         target_fitness: Optional[float] = None,
         regenerate_cubes_every: int = 10,

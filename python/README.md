@@ -205,6 +205,40 @@ python/
 └── .gitignore         # Arquivos ignorados pelo Git
 ```
 
+## Arquitetura da Rede Neural
+
+A rede neural é um **Multi-Layer Perceptron (MLP)** profundo otimizado para prever o próximo movimento com base no estado do cubo.
+
+```mermaid
+graph TD
+    Input[Input Layer<br>324 Neurons<br>(One-Hot Encoded State)] --> H1[Hidden Layer 1<br>512 Neurons<br>ReLU Activation]
+    H1 --> H2[Hidden Layer 2<br>512 Neurons<br>ReLU Activation]
+    H2 --> H3[Hidden Layer 3<br>256 Neurons<br>ReLU Activation]
+    H3 --> H4[Hidden Layer 4<br>128 Neurons<br>ReLU Activation]
+    H4 --> Output[Output Layer<br>18 Neurons<br>(Softmax Action Probabilities)]
+
+    style Input fill:#e1f5fe,stroke:#01579b
+    style Output fill:#e1f5fe,stroke:#01579b
+    style H1 fill:#fff9c4,stroke:#fbc02d
+    style H2 fill:#fff9c4,stroke:#fbc02d
+    style H3 fill:#fff9c4,stroke:#fbc02d
+    style H4 fill:#fff9c4,stroke:#fbc02d
+```
+
+## Google Colab (Treinamento em Nuvem)
+
+Para acelerar o treinamento usando GPUs da Google (sendo ~20x mais rápido que CPU):
+
+1. Faça upload da pasta `python/` para o seu Google Drive
+2. Abra o arquivo `train.ipynb` no Google Colab
+3. Siga as instruções no notebook para conectar e treinar
+
+O notebook já está configurado para:
+- Detectar e usar GPU (T4/V100/A100)
+- Importar automaticamente o código do projeto
+- Visualizar o progresso do treinamento com gráficos em tempo real
+- Salvar checkpoints no Google Drive
+
 ## Saída do Treinamento
 
 Os resultados do treinamento são salvos em `weights/run_TIMESTAMP/`:

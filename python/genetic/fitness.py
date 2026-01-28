@@ -1,33 +1,28 @@
 """
-Fitness Evaluation for Cube-Solving Networks
+Fitness Evaluation for Cube-Solving Networks - GPU Enhanced
 
 Evaluates how well a neural network can solve scrambled cubes.
+Supports GPU acceleration and curriculum learning.
 """
 
-import os
-import sys
-from multiprocessing import Pool
-from typing import List, Tuple
-
 import numpy as np
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import List, Tuple, Optional
+import torch
 
 from cube.cube_state import MOVES, CubeState
-from neural.network import CubeSolverNetwork
+from neural.network import CubeSolverNetwork, DEVICE
 
 
 class FitnessEvaluator:
-    """Evaluates fitness of individuals by testing cube solving."""
+    """Evaluates fitness of individuals by testing cube solving - GPU optimized."""
 
     def __init__(
         self,
-        num_test_cubes: int = 10,
+        num_test_cubes: int = 20,
         scramble_depth: int = 5,
-        max_steps: int = 50,
-        hidden1: int = 256,
-        hidden2: int = 128,
+        max_steps: int = 100,
+        hidden_sizes: tuple = (512, 512, 256, 128),
+        device: Optional[torch.device] = None,
     ):
         """
         Initialize evaluator.
@@ -36,26 +31,34 @@ class FitnessEvaluator:
             num_test_cubes: Number of cubes to test on
             scramble_depth: Moves used to scramble each cube
             max_steps: Max moves allowed to solve
-            hidden1: Network hidden layer 1 size
-            hidden2: Network hidden layer 2 size
+            hidden_sizes: Network architecture
+            device: torch device to use
         """
         self.num_test_cubes = num_test_cubes
         self.scramble_depth = scramble_depth
         self.max_steps = max_steps
-        self.hidden1 = hidden1
-        self.hidden2 = hidden2
+        self.hidden_sizes = hidden_sizes
+        self.device = device or DEVICE
 
         # Pre-generate test cubes for consistent evaluation
         self.test_cubes: List[CubeState] = []
+        self.scramble_moves: List[List[str]] = []  # Store scramble sequences
         self.regenerate_test_cubes()
 
     def regenerate_test_cubes(self):
         """Generate new set of test cubes."""
         self.test_cubes = []
+        self.scramble_moves = []
         for _ in range(self.num_test_cubes):
             cube = CubeState()
-            cube.scramble(self.scramble_depth)
+            moves = cube.scramble(self.scramble_depth)
             self.test_cubes.append(cube)
+            self.scramble_moves.append(moves)
+
+    def set_scramble_depth(self, depth: int):
+        """Update scramble depth and regenerate cubes."""
+        self.scramble_depth = depth
+        self.regenerate_test_cubes()
 
     def evaluate(self, genome: np.ndarray) -> Tuple[float, int, float]:
         """
@@ -65,27 +68,47 @@ class FitnessEvaluator:
             genome: Flat array of network weights
 
         Returns:
-            Tuple of (fitness, cubes_solved, avg_steps)
+            Tuple of (fitness, cubes_solved, avg_correct_stickers)
         """
         # Create network from genome
-        network = CubeSolverNetwork(self.hidden1, self.hidden2)
+        network = CubeSolverNetwork(
+            hidden_sizes=self.hidden_sizes,
+            dropout=0.0,  # No dropout during evaluation
+            device=self.device,
+        )
         network.set_weights_flat(genome)
         network.eval()
 
         total_reward = 0.0
         cubes_solved = 0
-        total_steps = 0
+        total_correct = 0
 
-        for test_cube in self.test_cubes:
+        # Bonus multiplier for solving
+        solve_bonus = 200 + self.scramble_depth * 20
+
+        for i, test_cube in enumerate(self.test_cubes):
             cube = test_cube.clone()
             steps = 0
+            visited_states = set()  # Prevent loops
+            solved = False
 
             for _ in range(self.max_steps):
                 if cube.is_solved():
                     cubes_solved += 1
-                    # Bonus for solving quickly
-                    total_reward += 100 + (self.max_steps - steps) * 2
+                    solved = True
+                    # Bigger bonus for solving quickly
+                    efficiency_bonus = (self.max_steps - steps) / self.max_steps
+                    total_reward += solve_bonus * (1 + efficiency_bonus)
+                    total_correct += 54
                     break
+
+                # Get state hash to detect loops
+                state_hash = cube.state.tobytes()
+                if state_hash in visited_states:
+                    # Stuck in a loop - penalize and break
+                    total_reward -= 5
+                    break
+                visited_states.add(state_hash)
 
                 # Get action from network
                 state = cube.to_one_hot()
@@ -96,80 +119,157 @@ class FitnessEvaluator:
                 cube.apply_move(move)
                 steps += 1
 
-            total_steps += steps
-
-            # Partial reward based on final state
-            if not cube.is_solved():
+            # Track final correct stickers
+            if not solved:
                 correct = cube.count_correct_stickers()
-                total_reward += (correct / 54.0) * 20
+                total_correct += correct
 
-        # Calculate average
+                # Reward based on progress (exponential to reward high correct counts)
+                progress = correct / 54.0
+                total_reward += progress * progress * 50
+
+        # Calculate averages
         fitness = total_reward / self.num_test_cubes
-        avg_steps = total_steps / self.num_test_cubes
+        avg_correct = total_correct / self.num_test_cubes
 
-        return fitness, cubes_solved, avg_steps
-
-
-def _evaluate_individual(args):
-    """Helper function for parallel evaluation."""
-    genome, evaluator_params = args
-
-    evaluator = FitnessEvaluator(
-        num_test_cubes=evaluator_params["num_test_cubes"],
-        scramble_depth=evaluator_params["scramble_depth"],
-        max_steps=evaluator_params["max_steps"],
-        hidden1=evaluator_params["hidden1"],
-        hidden2=evaluator_params["hidden2"],
-    )
-
-    # Use same test cubes for consistency
-    evaluator.test_cubes = evaluator_params["test_cubes"]
-
-    return evaluator.evaluate(genome)
+        return fitness, cubes_solved, avg_correct
 
 
-class ParallelFitnessEvaluator:
-    """Evaluates multiple individuals in parallel using multiprocessing."""
+class CurriculumFitnessEvaluator(FitnessEvaluator):
+    """
+    Fitness evaluator with curriculum learning.
+
+    Starts with easy scrambles and gradually increases difficulty
+    as the population improves.
+    """
 
     def __init__(
         self,
-        num_test_cubes: int = 10,
-        scramble_depth: int = 5,
-        max_steps: int = 50,
-        hidden1: int = 256,
-        hidden2: int = 128,
-        num_workers: int = 4,
+        num_test_cubes: int = 20,
+        initial_depth: int = 1,
+        max_depth: int = 20,
+        depth_increase_threshold: float = 0.5,  # Increase when 50% solved
+        max_steps: int = 100,
+        hidden_sizes: tuple = (512, 512, 256, 128),
+        device: Optional[torch.device] = None,
     ):
-        self.evaluator = FitnessEvaluator(
-            num_test_cubes, scramble_depth, max_steps, hidden1, hidden2
-        )
-        self.num_workers = num_workers
+        self.initial_depth = initial_depth
+        self.max_depth = max_depth
+        self.depth_increase_threshold = depth_increase_threshold
+        self.current_depth = initial_depth
+        self.generations_at_depth = 0
+        self.best_solve_rate = 0.0
 
-    def evaluate_population(self, genomes: List[np.ndarray]) -> List[Tuple[float, int, float]]:
+        super().__init__(
+            num_test_cubes=num_test_cubes,
+            scramble_depth=initial_depth,
+            max_steps=max_steps,
+            hidden_sizes=hidden_sizes,
+            device=device,
+        )
+
+    def update_difficulty(self, solve_rate: float) -> bool:
         """
-        Evaluate all genomes in parallel.
+        Update difficulty based on performance.
+
+        Args:
+            solve_rate: Fraction of cubes solved (0-1)
 
         Returns:
-            List of (fitness, solved_count, avg_steps) for each genome
+            True if difficulty was increased
         """
-        # Prepare arguments
-        evaluator_params = {
-            "num_test_cubes": self.evaluator.num_test_cubes,
-            "scramble_depth": self.evaluator.scramble_depth,
-            "max_steps": self.evaluator.max_steps,
-            "hidden1": self.evaluator.hidden1,
-            "hidden2": self.evaluator.hidden2,
-            "test_cubes": self.evaluator.test_cubes,
+        self.best_solve_rate = max(self.best_solve_rate, solve_rate)
+        self.generations_at_depth += 1
+
+        # Increase difficulty if solving well
+        if solve_rate >= self.depth_increase_threshold and self.current_depth < self.max_depth:
+            # Only increase if consistent performance
+            if self.generations_at_depth >= 3:
+                self.current_depth += 1
+                self.scramble_depth = self.current_depth
+                self.regenerate_test_cubes()
+                self.generations_at_depth = 0
+                self.best_solve_rate = 0.0
+                return True
+
+        return False
+
+    def get_status(self) -> dict:
+        """Get current curriculum status."""
+        return {
+            "current_depth": self.current_depth,
+            "max_depth": self.max_depth,
+            "generations_at_depth": self.generations_at_depth,
+            "best_solve_rate": self.best_solve_rate,
         }
 
-        args = [(genome, evaluator_params) for genome in genomes]
 
-        # Parallel evaluation
-        with Pool(self.num_workers) as pool:
-            results = pool.map(_evaluate_individual, args)
+class BatchFitnessEvaluator:
+    """
+    Batch evaluator that processes multiple genomes efficiently.
+
+    Uses shared network and batch operations for GPU efficiency.
+    """
+
+    def __init__(
+        self,
+        num_test_cubes: int = 20,
+        scramble_depth: int = 5,
+        max_steps: int = 100,
+        hidden_sizes: tuple = (512, 512, 256, 128),
+        device: Optional[torch.device] = None,
+    ):
+        self.evaluator = CurriculumFitnessEvaluator(
+            num_test_cubes=num_test_cubes,
+            initial_depth=scramble_depth,
+            max_depth=20,
+            max_steps=max_steps,
+            hidden_sizes=hidden_sizes,
+            device=device,
+        )
+        self.device = device or DEVICE
+
+    def evaluate_population(
+        self, genomes: List[np.ndarray], show_progress: bool = False
+    ) -> List[Tuple[float, int, float]]:
+        """
+        Evaluate all genomes.
+
+        Returns:
+            List of (fitness, solved_count, avg_correct) for each genome
+        """
+        results = []
+
+        if show_progress:
+            from tqdm import tqdm
+
+            iterator = tqdm(genomes, desc="Evaluating", leave=False)
+        else:
+            iterator = genomes
+
+        for genome in iterator:
+            result = self.evaluator.evaluate(genome)
+            results.append(result)
 
         return results
 
     def regenerate_test_cubes(self):
         """Generate new test cubes."""
         self.evaluator.regenerate_test_cubes()
+
+    def update_difficulty(self, solve_rate: float) -> bool:
+        """Update curriculum difficulty."""
+        return self.evaluator.update_difficulty(solve_rate)
+
+    def get_status(self) -> dict:
+        """Get curriculum status."""
+        return self.evaluator.get_status()
+
+    def set_scramble_depth(self, depth: int):
+        """Manually set scramble depth."""
+        self.evaluator.current_depth = depth
+        self.evaluator.set_scramble_depth(depth)
+
+    def evaluate(self, genome: np.ndarray) -> tuple:
+        """Evaluate a single genome (delegates to internal evaluator)."""
+        return self.evaluator.evaluate(genome)

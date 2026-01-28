@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Rubik's Cube Neural Network Trainer
+Rubik's Cube Neural Network Trainer - GPU Enhanced
 
-Train a neural network to solve Rubik's cubes using genetic algorithm.
+Train a neural network to solve Rubik's cubes using genetic algorithm
+with GPU acceleration and curriculum learning.
 
 Usage:
-    python train.py --population 50 --generations 100 --scramble-depth 5
-    python train.py --load checkpoint.json --generations 50
+    python train.py --population 100 --generations 500
+    python train.py --load checkpoint.json --generations 100
 """
 
 import argparse
@@ -16,15 +17,16 @@ import sys
 from datetime import datetime
 
 import numpy as np
+import torch
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from cube.cube_state import MOVES, CubeState
 from genetic.evolution import GeneticAlgorithm
-from genetic.fitness import FitnessEvaluator
+from genetic.fitness import BatchFitnessEvaluator
 from genetic.individual import Individual
-from neural.network import CubeSolverNetwork
+from neural.network import CubeSolverNetwork, get_device_info, DEVICE
 from neural.weight_export import export_training_stats, export_weights_to_json
 
 
@@ -34,43 +36,51 @@ def parse_args():
     )
 
     # Training parameters
-    parser.add_argument("--population", type=int, default=50, help="Population size (default: 50)")
     parser.add_argument(
-        "--generations", type=int, default=100, help="Number of generations (default: 100)"
+        "--population", type=int, default=100, help="Population size (default: 100)"
     )
     parser.add_argument(
-        "--scramble-depth", type=int, default=5, help="Number of moves to scramble (default: 5)"
+        "--generations", type=int, default=500, help="Number of generations (default: 500)"
     )
     parser.add_argument(
-        "--max-steps", type=int, default=30, help="Max moves to solve (default: 30)"
+        "--scramble-depth",
+        type=int,
+        default=1,
+        help="Initial scramble depth for curriculum (default: 1)",
+    )
+    parser.add_argument(
+        "--max-depth", type=int, default=20, help="Maximum scramble depth (default: 20)"
+    )
+    parser.add_argument(
+        "--max-steps", type=int, default=100, help="Max moves to solve (default: 100)"
     )
     parser.add_argument(
         "--test-cubes",
         type=int,
-        default=10,
-        help="Number of test cubes per evaluation (default: 10)",
+        default=20,
+        help="Number of test cubes per evaluation (default: 20)",
     )
 
     # Genetic algorithm parameters
     parser.add_argument(
-        "--mutation-rate", type=float, default=0.1, help="Mutation rate (default: 0.1)"
+        "--mutation-rate", type=float, default=0.15, help="Mutation rate (default: 0.15)"
     )
     parser.add_argument(
-        "--mutation-strength", type=float, default=0.3, help="Mutation strength (default: 0.3)"
+        "--mutation-strength", type=float, default=0.2, help="Mutation strength (default: 0.2)"
     )
     parser.add_argument(
         "--crossover-rate", type=float, default=0.7, help="Crossover rate (default: 0.7)"
     )
     parser.add_argument(
-        "--elitism", type=int, default=5, help="Number of elite individuals (default: 5)"
+        "--elitism", type=int, default=10, help="Number of elite individuals (default: 10)"
     )
 
     # Network architecture
     parser.add_argument(
-        "--hidden1", type=int, default=256, help="First hidden layer size (default: 256)"
-    )
-    parser.add_argument(
-        "--hidden2", type=int, default=128, help="Second hidden layer size (default: 128)"
+        "--hidden",
+        type=str,
+        default="512,512,256,128",
+        help="Hidden layer sizes comma-separated (default: 512,512,256,128)",
     )
 
     # I/O
@@ -83,6 +93,15 @@ def parse_args():
         type=int,
         default=10,
         help="Save checkpoint every N generations (default: 10)",
+    )
+
+    # Curriculum learning
+    parser.add_argument("--no-curriculum", action="store_true", help="Disable curriculum learning")
+    parser.add_argument(
+        "--curriculum-threshold",
+        type=float,
+        default=0.6,
+        help="Solve rate to increase difficulty (default: 0.6)",
     )
 
     # Other
@@ -103,7 +122,11 @@ def create_output_dir(output_dir: str) -> str:
 
 
 def save_checkpoint(
-    ga: GeneticAlgorithm, network: CubeSolverNetwork, output_dir: str, evaluator: FitnessEvaluator
+    ga: GeneticAlgorithm,
+    network: CubeSolverNetwork,
+    output_dir: str,
+    evaluator: BatchFitnessEvaluator,
+    hidden_sizes: tuple,
 ):
     """Save current training checkpoint."""
 
@@ -113,11 +136,13 @@ def save_checkpoint(
 
     # Save training stats
     stats = ga.get_statistics()
+    curriculum_status = evaluator.get_status()
     stats["evaluator"] = {
-        "scramble_depth": evaluator.scramble_depth,
-        "max_steps": evaluator.max_steps,
-        "test_cubes": evaluator.num_test_cubes,
+        "scramble_depth": curriculum_status["current_depth"],
+        "max_steps": evaluator.evaluator.max_steps,
+        "test_cubes": evaluator.evaluator.num_test_cubes,
     }
+    stats["curriculum"] = curriculum_status
     export_training_stats(stats, os.path.join(output_dir, "training_stats.json"))
 
     # Save full checkpoint for resuming
@@ -131,9 +156,9 @@ def save_checkpoint(
             "mutation_strength": ga.mutation_strength,
             "crossover_rate": ga.crossover_rate,
             "elitism_count": ga.elitism_count,
-            "hidden1": network.fc1.out_features,
-            "hidden2": network.fc2.out_features,
+            "hidden_sizes": list(hidden_sizes),
         },
+        "curriculum": curriculum_status,
         "history": {k: v for k, v in ga.history.items()},
     }
 
@@ -161,12 +186,21 @@ def test_best_network(
             print(f"  Scramble: {' '.join(scramble)}")
 
         moves_made = []
-        for step in range(50):
+        visited = set()
+
+        for step in range(100):
             if cube.is_solved():
                 solved += 1
                 if verbose:
-                    print(f"  Solved in {step} moves: {' '.join(moves_made)}")
+                    print(f"  ✓ Solved in {step} moves: {' '.join(moves_made)}")
                 break
+
+            state_hash = cube.state.tobytes()
+            if state_hash in visited:
+                if verbose:
+                    print(f"  ✗ Stuck in loop after {step} moves")
+                break
+            visited.add(state_hash)
 
             state = cube.to_one_hot()
             action = network.predict_action(state, deterministic=True)
@@ -176,10 +210,12 @@ def test_best_network(
         else:
             if verbose:
                 correct = cube.count_correct_stickers()
-                print(f"  Not solved (correct stickers: {correct}/54)")
+                print(f"  ✗ Not solved (correct stickers: {correct}/54)")
 
     if verbose:
-        print(f"\nSolved {solved}/{num_tests} cubes")
+        print(f"\n{'='*50}")
+        print(f"Results: Solved {solved}/{num_tests} cubes ({100*solved/num_tests:.0f}%)")
+        print(f"{'='*50}")
 
     return solved
 
@@ -187,20 +223,34 @@ def test_best_network(
 def main():
     args = parse_args()
 
+    # Parse hidden layer sizes
+    hidden_sizes = tuple(int(x) for x in args.hidden.split(","))
+
+    # Print device info
+    device_info = get_device_info()
+    print("\n" + "=" * 60)
+    print("🧊 RUBIK'S CUBE NEURAL SOLVER - GPU TRAINING")
+    print("=" * 60)
+    print(f"\n🖥️  Device: {device_info['device']}")
+    if device_info.get("cuda_available"):
+        print(f"   GPU: {device_info['cuda_device_name']}")
+        print(f"   Memory: {device_info['cuda_memory_gb']:.1f} GB")
+    else:
+        print("   ⚠️  CUDA not available - using CPU")
+
     # Create output directory
     output_dir = create_output_dir(args.output)
-    print(f"Output directory: {output_dir}")
+    print(f"\n📁 Output: {output_dir}")
 
     # Create network to get genome size
-    network = CubeSolverNetwork(args.hidden1, args.hidden2)
+    network = CubeSolverNetwork(hidden_sizes=hidden_sizes, device=DEVICE)
     genome_size = network.get_weight_count()
 
-    print("\nNetwork architecture:")
-    print("  Input: 324 (54 × 6 one-hot)")
-    print(f"  Hidden1: {args.hidden1}")
-    print(f"  Hidden2: {args.hidden2}")
-    print("  Output: 18 (moves)")
-    print(f"  Total weights: {genome_size:,}")
+    print(f"\n🧠 Network Architecture:")
+    print(f"   Input: 324 (54 × 6 one-hot)")
+    print(f"   Hidden: {' → '.join(str(h) for h in hidden_sizes)}")
+    print(f"   Output: 18 (moves)")
+    print(f"   Total weights: {genome_size:,}")
 
     # Create genetic algorithm
     ga = GeneticAlgorithm(
@@ -214,7 +264,7 @@ def main():
 
     # Load checkpoint if provided
     if args.load:
-        print(f"\nLoading checkpoint from {args.load}")
+        print(f"\n📂 Loading checkpoint from {args.load}")
         with open(args.load) as f:
             checkpoint = json.load(f)
 
@@ -224,73 +274,114 @@ def main():
         ga.best_ever.fitness = checkpoint["best_fitness"]
         ga.generation = checkpoint["generation"]
 
-        print(f"  Resumed from generation {ga.generation}")
-        print(f"  Best fitness: {ga.best_ever.fitness:.2f}")
+        print(f"   Resumed from generation {ga.generation}")
+        print(f"   Best fitness: {ga.best_ever.fitness:.2f}")
+
+        # Restore curriculum state if available
+        initial_depth = checkpoint.get("curriculum", {}).get("current_depth", args.scramble_depth)
     else:
         ga.initialize_population()
+        initial_depth = args.scramble_depth
 
-    # Create fitness evaluator
-    evaluator = FitnessEvaluator(
+    # Create fitness evaluator with curriculum learning
+    evaluator = BatchFitnessEvaluator(
         num_test_cubes=args.test_cubes,
-        scramble_depth=args.scramble_depth,
+        scramble_depth=initial_depth,
         max_steps=args.max_steps,
-        hidden1=args.hidden1,
-        hidden2=args.hidden2,
+        hidden_sizes=hidden_sizes,
+        device=DEVICE,
     )
 
-    print("\nTraining configuration:")
-    print(f"  Population: {args.population}")
-    print(f"  Generations: {args.generations}")
-    print(f"  Scramble depth: {args.scramble_depth}")
-    print(f"  Max steps: {args.max_steps}")
-    print(f"  Test cubes: {args.test_cubes}")
+    # Set curriculum threshold
+    evaluator.evaluator.depth_increase_threshold = args.curriculum_threshold
 
-    print("\nStarting training...\n")
+    print(f"\n⚙️  Training Configuration:")
+    print(f"   Population: {args.population}")
+    print(f"   Generations: {args.generations}")
+    print(
+        f"   Curriculum: {'Disabled' if args.no_curriculum else f'{initial_depth} → {args.max_depth} moves'}"
+    )
+    print(f"   Max steps: {args.max_steps}")
+    print(f"   Test cubes: {args.test_cubes}")
+    print(f"   Mutation: {args.mutation_rate} rate, {args.mutation_strength} strength")
+    print(f"   Elitism: {args.elitism}")
+
+    print("\n🚀 Starting training...\n")
 
     # Run evolution
     try:
         for gen in range(args.generations):
-            # Regenerate test cubes every 10 generations
-            if gen > 0 and gen % 10 == 0:
+            # Regenerate test cubes every 5 generations to prevent overfitting
+            if gen > 0 and gen % 5 == 0:
                 evaluator.regenerate_test_cubes()
 
             ga.evolve_generation(evaluator)
 
             best = ga.population[0]
             avg = np.mean([ind.fitness for ind in ga.population])
+            solve_rate = best.solved_count / args.test_cubes
+
+            # Update curriculum (if not disabled)
+            depth_changed = False
+            if not args.no_curriculum:
+                depth_changed = evaluator.update_difficulty(solve_rate)
+
+            curriculum = evaluator.get_status()
 
             if not args.quiet:
+                status_emoji = "🎉" if best.solved_count > 0 else "📈" if depth_changed else "🔄"
+                depth_str = f"D{curriculum['current_depth']:2d}"
                 print(
-                    f"Gen {ga.generation:4d} | Best: {best.fitness:6.2f} | "
-                    f"Solved: {best.solved_count:2d}/{args.test_cubes} | "
+                    f"{status_emoji} Gen {ga.generation:4d} | {depth_str} | "
+                    f"Best: {best.fitness:7.2f} | "
+                    f"Solved: {best.solved_count:2d}/{args.test_cubes} ({100*solve_rate:3.0f}%) | "
                     f"Avg: {avg:6.2f}"
                 )
 
+                if depth_changed:
+                    print(f"   ⬆️  Difficulty increased to depth {curriculum['current_depth']}")
+
             # Save checkpoint periodically
             if ga.generation % args.save_every == 0:
-                save_checkpoint(ga, network, output_dir, evaluator)
+                save_checkpoint(ga, network, output_dir, evaluator, hidden_sizes)
 
             # Early stopping
             if args.target_fitness and ga.best_ever.fitness >= args.target_fitness:
-                print(f"\nTarget fitness {args.target_fitness} reached!")
+                print(f"\n🎯 Target fitness {args.target_fitness} reached!")
+                break
+
+            # Check if we've mastered the max depth
+            if curriculum["current_depth"] >= args.max_depth and solve_rate >= 0.9:
+                print(
+                    f"\n🏆 Mastered depth {args.max_depth} with {solve_rate*100:.0f}% solve rate!"
+                )
                 break
 
     except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user")
+        print("\n\n⚠️  Training interrupted by user")
 
     # Final save
-    save_checkpoint(ga, network, output_dir, evaluator)
+    save_checkpoint(ga, network, output_dir, evaluator, hidden_sizes)
 
-    print("\n" + "=" * 50)
-    print("Training complete!")
-    print("=" * 50)
-    print(f"Best fitness: {ga.best_ever.fitness:.2f}")
-    print(f"Generations: {ga.generation}")
-    print(f"Weights saved to: {output_dir}/best_weights.json")
+    curriculum = evaluator.get_status()
 
-    # Test the best network
+    print("\n" + "=" * 60)
+    print("✅ Training Complete!")
+    print("=" * 60)
+    print(f"   Best fitness: {ga.best_ever.fitness:.2f}")
+    print(f"   Generations: {ga.generation}")
+    print(f"   Final depth: {curriculum['current_depth']}")
+    print(f"   Weights: {output_dir}/best_weights.json")
+
+    # Test the best network at various depths
     network.set_weights_flat(ga.best_ever.genome)
-    test_best_network(network, args.scramble_depth, num_tests=5, verbose=not args.quiet)
+
+    print("\n📊 Testing at different scramble depths:")
+    for test_depth in [1, 3, 5, 10, curriculum["current_depth"]]:
+        if test_depth > curriculum["current_depth"] + 5:
+            break
+        solved = test_best_network(network, test_depth, num_tests=5, verbose=False)
+        print(f"   Depth {test_depth:2d}: {solved}/5 solved ({100*solved/5:.0f}%)")
 
 
 if __name__ == "__main__":
