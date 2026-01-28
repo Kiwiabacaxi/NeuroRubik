@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rubik's Cube Neural Solver</title>
+  <meta name="description" content="AI-powered Rubik's cube solver using neural networks and genetic algorithms">
+  <link rel="stylesheet" href="/src/styles/main.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>🧩 Rubik's Cube Neural Solver</h1>
+      <p class="subtitle">Powered by Genetic Algorithm + Neural Network</p>
+    </header>
+
+    <!-- Main content -->
+    <main class="main-content">
+      <!-- 3D Canvas -->
+      <div class="canvas-container" id="canvas-container">
+        <canvas id="cube-canvas"></canvas>
+      </div>
+
+      <!-- Sidebar controls -->
+      <aside class="sidebar">
+        <!-- Model status -->
+        <section class="panel" id="model-panel">
+          <h2>🧠 Neural Model</h2>
+          <div class="model-status" id="model-status">
+            <span class="status-indicator offline"></span>
+            <span>No model loaded</span>
+          </div>
+          <div class="button-group">
+            <button id="btn-load-model" class="btn btn-primary">
+              📂 Load Weights
+            </button>
+            <input type="file" id="file-input" accept=".json" hidden>
+          </div>
+        </section>
+
+        <!-- Cube controls -->
+        <section class="panel" id="cube-panel">
+          <h2>🎮 Cube Controls</h2>
+          <div class="button-group">
+            <button id="btn-scramble" class="btn">🔀 Scramble</button>
+            <button id="btn-reset" class="btn">↩️ Reset</button>
+          </div>
+          <div class="button-group">
+            <button id="btn-solve" class="btn btn-success" disabled>
+              ✨ Solve
+            </button>
+          </div>
+          <div class="speed-control">
+            <label for="speed-slider">Animation Speed</label>
+            <input type="range" id="speed-slider" min="100" max="1000" value="300">
+          </div>
+        </section>
+
+        <!-- Manual moves -->
+        <section class="panel" id="moves-panel">
+          <h2>🔄 Manual Moves</h2>
+          <div class="moves-grid">
+            <button class="btn-move" data-move="U">U</button>
+            <button class="btn-move" data-move="U'">U'</button>
+            <button class="btn-move" data-move="D">D</button>
+            <button class="btn-move" data-move="D'">D'</button>
+            <button class="btn-move" data-move="R">R</button>
+            <button class="btn-move" data-move="R'">R'</button>
+            <button class="btn-move" data-move="L">L</button>
+            <button class="btn-move" data-move="L'">L'</button>
+            <button class="btn-move" data-move="F">F</button>
+            <button class="btn-move" data-move="F'">F'</button>
+            <button class="btn-move" data-move="B">B</button>
+            <button class="btn-move" data-move="B'">B'</button>
+          </div>
+        </section>
+
+        <!-- Statistics -->
+        <section class="panel" id="stats-panel">
+          <h2>📊 Statistics</h2>
+          <div class="stats-grid">
+            <div class="stat">
+              <span class="stat-label">Status</span>
+              <span class="stat-value" id="stat-status">Ready</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Moves</span>
+              <span class="stat-value" id="stat-moves">0</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Correct</span>
+              <span class="stat-value" id="stat-correct">54/54</span>
+            </div>
+          </div>
+          <div class="solution-display" id="solution-display">
+            <label>Solution:</label>
+            <div class="solution-moves" id="solution-moves">-</div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+  
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

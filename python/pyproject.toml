@@ -1,0 +1,50 @@
+[project]
+name = "cube-neural-solver"
+version = "0.1.0"
+description = "Neural network to solve Rubik's cube using genetic algorithm"
+requires-python = ">=3.8"
+
+[tool.ruff]
+# Linha máxima de 100 caracteres
+line-length = 100
+
+# Python 3.8+ como target
+target-version = "py38"
+
+[tool.ruff.lint]
+# Regras de linting ativadas
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+
+# Regras ignoradas
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+]
+
+# Permitir auto-fix para todas as regras habilitadas
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+# Usar aspas duplas
+quote-style = "double"
+
+# Indentar com 4 espaços
+indent-style = "space"
+
+# Usar line endings Unix
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+# Configuração de ordenação de imports
+known-first-party = ["cube", "neural", "genetic"]
